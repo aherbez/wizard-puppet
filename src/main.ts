@@ -6,6 +6,7 @@ import { addEyes } from './eyes';
 import { applySkin } from './skin';
 import { Flame } from './flame';
 import { ParticleFlame, sampleEmitters } from './particles';
+import { TiledBackground } from './background';
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
@@ -14,6 +15,10 @@ document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
+
+// Tiled wallpaper drifting slowly on a diagonal behind the puppet.
+const background = new TiledBackground(`${import.meta.env.BASE_URL}textures/wallpaper_bw.jpg`);
+scene.add(background);
 
 const camera = new THREE.PerspectiveCamera(
   45,
@@ -164,6 +169,7 @@ renderer.setAnimationLoop((time) => {
     eye.visible = !flaring;
   }
   for (const flame of flames) flame.update(dt);
+  background.update(dt);
 
   renderer.render(scene, camera);
 });

@@ -24,6 +24,9 @@ export interface ParticleFlameOptions {
   flareIntensity?: number; // brightness multiplier at full flare
 }
 
+// The white-hot colour of new flames; also used where the skin blends into them.
+export const FLAME_HOT_COLOR = new THREE.Color(0xe8ffe8);
+
 const VERTEX = /* glsl */ `
   attribute float aLife; // 0 at birth .. 1 at death
   attribute float aSeed;
@@ -163,7 +166,7 @@ export class ParticleFlame extends THREE.Points<THREE.BufferGeometry, THREE.Shad
         uIntensity: { value: opts.intensity },
         uColorDark: { value: new THREE.Color(0x021f06) },
         uColorMid: { value: new THREE.Color(0x2bff4a) },
-        uColorHot: { value: new THREE.Color(0xe8ffe8) },
+        uColorHot: { value: FLAME_HOT_COLOR.clone() },
       },
       transparent: true,
       blending: THREE.AdditiveBlending,

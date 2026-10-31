@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { FLAME_HOT_COLOR } from './particles';
 
 // Curvature bake settings.
 const CURVATURE_SMOOTHING_PASSES = 3; // blurs the per-vertex estimate so broad areas read as one
@@ -14,14 +15,16 @@ export const skinUniforms = {
   uNoiseScale: { value: 60 }, // noise frequency in model units
   uNoiseCrease: { value: 0.3 }, // noise strength in seams
   uNoiseFlat: { value: 0.05 }, // noise strength on flat areas
-  uFlatStart: { value: 0.7 }, // flatness above this starts turning transparent
-  uFlatTransparency: { value: 0.08 }, // max transparency on the flattest areas
   uNeckBottom: { value: 0 }, // distance up the neck axis (from the lowest vertex) where the fade reaches 0
   uNeckFade: { value: 0.225 }, // length of the fade band above uNeckBottom
+  uTopHeight: { value: 0.5 }, // rest-pose height (model Y = Blender Z) of the crown; set from the mesh in applySkin
+  uTopBand: { value: 0.2 }, // the top blend runs from this far below the crown up to it
+  uTopColor: { value: FLAME_HOT_COLOR.clone() }, // the crown blends to the flames' white-hot colour...
+  uTopGlow: { value: 0.7 }, // ...glowing at this strength
 };
 
-// Bakes per-vertex `crease` (0..1, how concave: seams, folds, corners) and
-// `flatness` (0..1, how close to flat) attributes from the rest-pose mesh.
+// Bakes a per-vertex `crease` attribute (0..1, how concave: seams, folds,
+// corners) from the rest-pose mesh.
 export function bakeCurvature(geometry: THREE.BufferGeometry): void {
   const position = geometry.getAttribute('position');
   const normal = geometry.getAttribute('normal');
@@ -84,14 +87,10 @@ export function bakeCurvature(geometry: THREE.BufferGeometry): void {
   const scale = magnitudes[Math.floor(CURVATURE_NORMALIZE_PERCENTILE * (welded - 1))] || 1;
 
   const crease = new Float32Array(count);
-  const flatness = new Float32Array(count);
   for (let i = 0; i < count; i++) {
-    const k = curvature[weldId[i]] / scale;
-    crease[i] = THREE.MathUtils.clamp(k, 0, 1);
-    flatness[i] = 1 - THREE.MathUtils.clamp(Math.abs(k), 0, 1);
+    crease[i] = THREE.MathUtils.clamp(curvature[weldId[i]] / scale, 0, 1);
   }
   geometry.setAttribute('crease', new THREE.BufferAttribute(crease, 1));
-  geometry.setAttribute('flatness', new THREE.BufferAttribute(flatness, 1));
 }
 
 // Bakes each vertex's rest-pose distance along the neck axis into a
@@ -147,10 +146,10 @@ const NOISE_GLSL = /* glsl */ `
 `;
 
 // Lit skin material that darkens and roughens seams with noise, keeps flat
-// areas cleaner and very slightly transparent, and fades out at the neck.
-// Built on MeshStandardMaterial so lighting, skinning and morph targets still
-// work. The mesh's geometry needs `crease`, `flatness` and `neckHeight`
-// attributes (see bakeCurvature and bakeNeckHeight).
+// areas cleaner, blends to the flames' colour at the crown, and fades out at
+// the neck (otherwise fully opaque). Built on MeshStandardMaterial so
+// lighting, skinning and morph targets still work. The mesh's geometry needs
+// `crease` and `neckHeight` attributes (see bakeCurvature and bakeNeckHeight).
 export function createSkinMaterial(previous: THREE.MeshStandardMaterial): THREE.Material {
   const material = new THREE.MeshStandardMaterial({
     name: 'skin',
@@ -171,10 +170,8 @@ export function createSkinMaterial(previous: THREE.MeshStandardMaterial): THREE.
         '#include <common>',
         `#include <common>
         attribute float crease;
-        attribute float flatness;
         attribute float neckHeight;
         varying float vCrease;
-        varying float vFlatness;
         varying float vNeckHeight;
         varying vec3 vRestPosition;`,
       )
@@ -182,7 +179,6 @@ export function createSkinMaterial(previous: THREE.MeshStandardMaterial): THREE.
         '#include <begin_vertex>',
         `#include <begin_vertex>
         vCrease = crease;
-        vFlatness = flatness;
         vNeckHeight = neckHeight;
         vRestPosition = position;`,
       );
@@ -195,12 +191,13 @@ export function createSkinMaterial(previous: THREE.MeshStandardMaterial): THREE.
         uniform float uNoiseScale;
         uniform float uNoiseCrease;
         uniform float uNoiseFlat;
-        uniform float uFlatStart;
-        uniform float uFlatTransparency;
         uniform float uNeckBottom;
         uniform float uNeckFade;
+        uniform float uTopHeight;
+        uniform float uTopBand;
+        uniform vec3 uTopColor;
+        uniform float uTopGlow;
         varying float vCrease;
-        varying float vFlatness;
         varying float vNeckHeight;
         varying vec3 vRestPosition;
         ${NOISE_GLSL}`,
@@ -215,14 +212,18 @@ export function createSkinMaterial(previous: THREE.MeshStandardMaterial): THREE.
         float skinShade = max(0.0, (1.0 - uCreaseDarken * vCrease) * (1.0 + noise * noiseAmount));
         diffuseColor.rgb *= skinShade;
 
-        diffuseColor.a *= 1.0 - uFlatTransparency * smoothstep(uFlatStart, 1.0, vFlatness);
-        diffuseColor.a *= smoothstep(uNeckBottom, uNeckBottom + uNeckFade, vNeckHeight);`,
+        diffuseColor.a *= smoothstep(uNeckBottom, uNeckBottom + uNeckFade, vNeckHeight);
+
+        // Toward the crown, blend into the flames' white-hot colour.
+        float topBlend = smoothstep(uTopHeight - uTopBand, uTopHeight, vRestPosition.y);
+        diffuseColor.rgb = mix(diffuseColor.rgb, uTopColor, topBlend);`,
       )
-      // Seams and noise darken the glow too, so it doesn't wash them out.
+      // Seams and noise darken the glow too, so it doesn't wash them out; the
+      // crown glows like the flames instead.
       .replace(
         '#include <emissivemap_fragment>',
         `#include <emissivemap_fragment>
-        totalEmissiveRadiance *= skinShade;`,
+        totalEmissiveRadiance = mix(totalEmissiveRadiance * skinShade, uTopColor * uTopGlow, topBlend);`,
       );
   };
 
@@ -238,6 +239,8 @@ export function applySkin(model: THREE.Object3D): void {
     const previous = mesh.material as THREE.MeshStandardMaterial;
     bakeCurvature(mesh.geometry);
     bakeNeckHeight(mesh);
+    mesh.geometry.computeBoundingBox();
+    skinUniforms.uTopHeight.value = mesh.geometry.boundingBox!.max.y;
     mesh.material = createSkinMaterial(previous);
     previous.dispose();
   });
