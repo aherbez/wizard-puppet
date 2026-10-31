@@ -124,7 +124,11 @@ new GLTFLoader().load(
 const dvd = new DvdScreensaver(`${import.meta.env.BASE_URL}textures/oz_logo.png`);
 dvd.resize(window.innerWidth, window.innerHeight);
 let showDvd = false;
-onPress('KeyM', () => (showDvd = !showDvd));
+onPress('KeyM', () => {
+  showDvd = !showDvd;
+  // Each time the screensaver comes up, it starts in the logo's own colours.
+  if (showDvd) dvd.resetColor();
+});
 
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;

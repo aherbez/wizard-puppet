@@ -88,6 +88,11 @@ export class DvdScreensaver {
     this.camera.updateProjectionMatrix();
   }
 
+  // Back to the logo's original colours.
+  resetColor(): void {
+    this.logo.material.uniforms.uHue.value = 0;
+  }
+
   update(dt: number): void {
     const p = this.logo.position;
     p.x += this.velocity.x * dt;
