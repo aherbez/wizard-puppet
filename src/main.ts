@@ -1,12 +1,13 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { axis, isDown } from './input';
+import { axis, isDown, onPress } from './input';
 import { HoldRamp, HoldSpring } from './ramp';
 import { addEyes } from './eyes';
 import { applySkin } from './skin';
 import { Flame } from './flame';
 import { ParticleFlame, sampleEmitters } from './particles';
 import { TiledBackground } from './background';
+import { DvdScreensaver } from './dvd';
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
@@ -118,9 +119,17 @@ new GLTFLoader().load(
   (err) => console.error('Failed to load wizard_head.glb', err),
 );
 
+// Second mode: a DVD-player-style bouncing logo. M toggles between it and the
+// puppet; whichever isn't showing is paused.
+const dvd = new DvdScreensaver(`${import.meta.env.BASE_URL}textures/oz_logo.png`);
+dvd.resize(window.innerWidth, window.innerHeight);
+let showDvd = false;
+onPress('KeyM', () => (showDvd = !showDvd));
+
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
+  dvd.resize(window.innerWidth, window.innerHeight);
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
@@ -146,6 +155,12 @@ const timer = new THREE.Timer();
 renderer.setAnimationLoop((time) => {
   timer.update(time);
   const dt = timer.getDelta();
+
+  if (showDvd) {
+    dvd.update(dt);
+    renderer.render(dvd.scene, dvd.camera);
+    return;
+  }
 
   // +X tips the face down (forward); +Y turns it toward screen right.
   head.rotation.x = driveAngle(head.rotation.x, axis(['KeyW', 'ArrowUp'], ['KeyS', 'ArrowDown']) * -1, MAX_PITCH, dt);

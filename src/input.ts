@@ -2,7 +2,7 @@
 // (e.g. 'KeyW', 'ArrowUp') so Shift / Caps Lock don't matter.
 const pressed = new Set<string>();
 
-const CAPTURED = /^(Arrow|Key[WASDQER]$|Space$)/;
+const CAPTURED = /^(Arrow|Key[WASDQERM]$|Space$)/;
 
 window.addEventListener('keydown', (e) => {
   if (CAPTURED.test(e.code)) e.preventDefault();
@@ -10,6 +10,13 @@ window.addEventListener('keydown', (e) => {
 });
 window.addEventListener('keyup', (e) => pressed.delete(e.code));
 window.addEventListener('blur', () => pressed.clear());
+
+// Calls `handler` once each time the key goes down (ignoring auto-repeat).
+export function onPress(code: string, handler: () => void): void {
+  window.addEventListener('keydown', (e) => {
+    if (e.code === code && !e.repeat) handler();
+  });
+}
 
 export function isDown(code: string): boolean {
   return pressed.has(code);
