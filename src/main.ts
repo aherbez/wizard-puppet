@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { axis, isDown, onPress } from './input';
+import { axis, isDown } from './input';
 import { HoldRamp, HoldSpring } from './ramp';
 import { addEyes } from './eyes';
 import { applySkin } from './skin';
 import { Flame } from './flame';
+import { ParticleFlame, sampleEmitters } from './particles';
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
@@ -36,17 +37,12 @@ scene.add(head);
 let jaw: THREE.Object3D | undefined;
 const jawRest = new THREE.Quaternion();
 
-// Flames: a corona around the head, and fireballs in the eyes toggled with F.
-const flames: Flame[] = [];
+// Flames: particles rising off the head, and fireballs that replace the
+// eyeballs. Holding R flares the head flames up and sets the eyes on fire.
+const flames: { update(dt: number): void }[] = [];
+let headFlame: ParticleFlame | undefined;
+const flareRamp = new HoldRamp(0.25, 0.9);
 const eyeFlames: { eye: THREE.Mesh; flame: Flame }[] = [];
-let eyesOnFire = false;
-onPress('KeyF', () => {
-  eyesOnFire = !eyesOnFire;
-  for (const { eye, flame } of eyeFlames) {
-    flame.visible = eyesOnFire;
-    eye.visible = !eyesOnFire;
-  }
-});
 
 // Morph targets driven by held keys, like the jaw.
 const MORPH_CONTROLS = [
@@ -62,19 +58,28 @@ new GLTFLoader().load(
     applySkin(gltf.scene);
     const eyes = addEyes(gltf.scene);
 
-    // Sized from the head's rest-pose bounds, in model space (before it's
-    // placed under the head group).
-    const bounds = new THREE.Sphere();
+    // Head flames are born where hair would grow: above a hairline that sits
+    // partway up the forehead at the front and drops toward eye level at the
+    // back, so the face stays clear. Measured in model space, before the model
+    // is placed under the head group.
+    const eyeLevel = new THREE.Vector3();
+    for (const eye of eyes) eyeLevel.add(eye.getWorldPosition(new THREE.Vector3()));
+    eyeLevel.divideScalar(Math.max(eyes.length, 1));
     gltf.scene.traverse((obj) => {
       const mesh = obj as THREE.SkinnedMesh;
       if (!mesh.isSkinnedMesh) return;
-      mesh.computeBoundingSphere();
-      bounds.copy(mesh.boundingSphere!).applyMatrix4(mesh.matrixWorld);
+      const crown = Math.max(...sampleEmitters(mesh, () => true).positions.map((p) => p.y));
+      const span = crown - eyeLevel.y;
+      const frontHairline = eyeLevel.y + span * 0.5;
+      const backHairline = eyeLevel.y + span * 0.1;
+      const emitters = sampleEmitters(mesh, (p) => {
+        const frontness = THREE.MathUtils.smoothstep(p.z, eyeLevel.z - 0.35, eyeLevel.z);
+        return p.y > THREE.MathUtils.lerp(backHairline, frontHairline, frontness);
+      });
+      headFlame = new ParticleFlame(head, emitters);
+      scene.add(headFlame);
+      flames.push(headFlame);
     });
-    const headFlame = new Flame({ radius: bounds.radius * 1.3, innerRadius: 0.5, clearFront: 1, intensity: 2.2 });
-    headFlame.position.copy(bounds.center);
-    head.add(headFlame);
-    flames.push(headFlame);
 
     // Siblings of the eyeballs (not children) so they stay visible when the
     // eyeballs are hidden.
@@ -152,6 +157,12 @@ renderer.setAnimationLoop((time) => {
     for (const { mesh, index } of morphBindings[i]) mesh.morphTargetInfluences![index] = weight;
   });
 
+  const flaring = isDown('KeyR');
+  if (headFlame) headFlame.flare = flareRamp.update(flaring, dt);
+  for (const { eye, flame } of eyeFlames) {
+    flame.visible = flaring;
+    eye.visible = !flaring;
+  }
   for (const flame of flames) flame.update(dt);
 
   renderer.render(scene, camera);
