@@ -1,9 +1,15 @@
 import * as THREE from 'three';
+import { MeshBVH } from 'three-mesh-bvh';
 import { FLAME_HOT_COLOR } from './particles';
 
 // Curvature bake settings.
 const CURVATURE_SMOOTHING_PASSES = 3; // blurs the per-vertex estimate so broad areas read as one
 const CURVATURE_NORMALIZE_PERCENTILE = 0.9; // this |curvature| maps to 1 (fully creased / not flat)
+
+// Ambient occlusion bake settings (model units; the head is ~1 unit tall).
+const AO_RAYS = 64;
+const AO_MAX_DISTANCE = 0.25;
+const AO_RAY_OFFSET = 0.001; // start rays just off the surface to avoid self-hits
 
 // Green self-glow in the model's own colour, so the head isn't only lit.
 // Live-tweakable via the material's emissiveIntensity.
@@ -15,6 +21,8 @@ export const skinUniforms = {
   uNoiseScale: { value: 60 }, // noise frequency in model units
   uNoiseCrease: { value: 0.3 }, // noise strength in seams
   uNoiseFlat: { value: 0.05 }, // noise strength on flat areas
+  uAoThreshold: { value: 0.4 }, // only AO below this darkens (deep pockets such as inside the mouth)...
+  uAoDarken: { value: 0.75 }, // ...by up to this much where fully occluded
   uNeckBottom: { value: 0 }, // distance up the neck axis (from the lowest vertex) where the fade reaches 0
   uNeckFade: { value: 0.225 }, // length of the fade band above uNeckBottom
   uTopHeight: { value: 0.5 }, // rest-pose height (model Y = Blender Z) of the crown; set from the mesh in applySkin
@@ -93,6 +101,70 @@ export function bakeCurvature(geometry: THREE.BufferGeometry): void {
   geometry.setAttribute('crease', new THREE.BufferAttribute(crease, 1));
 }
 
+// Fixed cosine-weighted hemisphere directions around +Z.
+function hemisphereDirections(count: number): THREE.Vector3[] {
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const dirs: THREE.Vector3[] = [];
+  for (let i = 0; i < count; i++) {
+    const r = Math.sqrt((i + 0.5) / count);
+    const phi = i * golden;
+    dirs.push(new THREE.Vector3(r * Math.cos(phi), r * Math.sin(phi), Math.sqrt(1 - r * r)));
+  }
+  return dirs;
+}
+
+// Bakes per-vertex ambient occlusion (1 = fully open, 0 = fully occluded) into
+// an `ao` attribute, using the rest pose. Vertices split by UV seams are
+// averaged so there's no visible line along the seams.
+export function bakeVertexAO(geometry: THREE.BufferGeometry): void {
+  const start = performance.now();
+  const bvh = new MeshBVH(geometry);
+  const position = geometry.getAttribute('position');
+  const normal = geometry.getAttribute('normal');
+  const ao = new Float32Array(position.count);
+  const dirs = hemisphereDirections(AO_RAYS);
+
+  const p = new THREE.Vector3();
+  const n = new THREE.Vector3();
+  const toNormal = new THREE.Quaternion();
+  const up = new THREE.Vector3(0, 0, 1);
+  const ray = new THREE.Ray();
+
+  for (let i = 0; i < position.count; i++) {
+    p.fromBufferAttribute(position, i);
+    n.fromBufferAttribute(normal, i).normalize();
+    toNormal.setFromUnitVectors(up, n);
+    ray.origin.copy(p).addScaledVector(n, AO_RAY_OFFSET);
+
+    // Closer hits occlude more, so occlusion fades out smoothly with distance.
+    let occlusion = 0;
+    for (const dir of dirs) {
+      ray.direction.copy(dir).applyQuaternion(toNormal);
+      const hit = bvh.raycastFirst(ray, THREE.DoubleSide, 0, AO_MAX_DISTANCE);
+      if (hit) occlusion += 1 - hit.distance / AO_MAX_DISTANCE;
+    }
+    ao[i] = 1 - occlusion / AO_RAYS;
+  }
+
+  const sums = new Map<string, { total: number; count: number }>();
+  const keys: string[] = [];
+  for (let i = 0; i < position.count; i++) {
+    const key = `${position.getX(i).toFixed(5)},${position.getY(i).toFixed(5)},${position.getZ(i).toFixed(5)}`;
+    keys.push(key);
+    const sum = sums.get(key) ?? { total: 0, count: 0 };
+    sum.total += ao[i];
+    sum.count++;
+    sums.set(key, sum);
+  }
+  for (let i = 0; i < position.count; i++) {
+    const sum = sums.get(keys[i])!;
+    ao[i] = sum.total / sum.count;
+  }
+
+  geometry.setAttribute('ao', new THREE.BufferAttribute(ao, 1));
+  console.info(`Baked AO for ${position.count} vertices in ${Math.round(performance.now() - start)}ms`);
+}
+
 // Bakes each vertex's rest-pose distance along the neck axis into a
 // `neckHeight` attribute, measured from the lowest vertex. The axis runs from
 // the root bone to its first child bone, so the fade follows the neck however
@@ -146,10 +218,11 @@ const NOISE_GLSL = /* glsl */ `
 `;
 
 // Lit skin material that darkens and roughens seams with noise, keeps flat
-// areas cleaner, blends to the flames' colour at the crown, and fades out at
+// areas cleaner, darkens deep pockets such as the mouth, blends to the flames' colour at the crown, and fades out at
 // the neck (otherwise fully opaque). Built on MeshStandardMaterial so
 // lighting, skinning and morph targets still work. The mesh's geometry needs
-// `crease` and `neckHeight` attributes (see bakeCurvature and bakeNeckHeight).
+// `crease`, `ao` and `neckHeight` attributes (see bakeCurvature, bakeVertexAO
+// and bakeNeckHeight).
 export function createSkinMaterial(previous: THREE.MeshStandardMaterial): THREE.Material {
   const material = new THREE.MeshStandardMaterial({
     name: 'skin',
@@ -171,7 +244,9 @@ export function createSkinMaterial(previous: THREE.MeshStandardMaterial): THREE.
         `#include <common>
         attribute float crease;
         attribute float neckHeight;
+        attribute float ao;
         varying float vCrease;
+        varying float vAo;
         varying float vNeckHeight;
         varying vec3 vRestPosition;`,
       )
@@ -179,6 +254,7 @@ export function createSkinMaterial(previous: THREE.MeshStandardMaterial): THREE.
         '#include <begin_vertex>',
         `#include <begin_vertex>
         vCrease = crease;
+        vAo = ao;
         vNeckHeight = neckHeight;
         vRestPosition = position;`,
       );
@@ -191,6 +267,8 @@ export function createSkinMaterial(previous: THREE.MeshStandardMaterial): THREE.
         uniform float uNoiseScale;
         uniform float uNoiseCrease;
         uniform float uNoiseFlat;
+        uniform float uAoThreshold;
+        uniform float uAoDarken;
         uniform float uNeckBottom;
         uniform float uNeckFade;
         uniform float uTopHeight;
@@ -198,6 +276,7 @@ export function createSkinMaterial(previous: THREE.MeshStandardMaterial): THREE.
         uniform vec3 uTopColor;
         uniform float uTopGlow;
         varying float vCrease;
+        varying float vAo;
         varying float vNeckHeight;
         varying vec3 vRestPosition;
         ${NOISE_GLSL}`,
@@ -210,6 +289,9 @@ export function createSkinMaterial(previous: THREE.MeshStandardMaterial): THREE.
         float noise = (skinValueNoise(np) * 0.65 + skinValueNoise(np * 2.7) * 0.35) * 2.0 - 1.0;
         float noiseAmount = mix(uNoiseFlat, uNoiseCrease, vCrease);
         float skinShade = max(0.0, (1.0 - uCreaseDarken * vCrease) * (1.0 + noise * noiseAmount));
+        // Only the deepest pockets (e.g. inside the mouth) darken, easing in
+        // below the threshold, so the mouth reads as it opens.
+        skinShade *= 1.0 - uAoDarken * (1.0 - smoothstep(0.0, uAoThreshold, vAo));
         diffuseColor.rgb *= skinShade;
 
         diffuseColor.a *= smoothstep(uNeckBottom, uNeckBottom + uNeckFade, vNeckHeight);
@@ -238,6 +320,7 @@ export function applySkin(model: THREE.Object3D): void {
     if (!mesh.isSkinnedMesh) return;
     const previous = mesh.material as THREE.MeshStandardMaterial;
     bakeCurvature(mesh.geometry);
+    bakeVertexAO(mesh.geometry);
     bakeNeckHeight(mesh);
     mesh.geometry.computeBoundingBox();
     skinUniforms.uTopHeight.value = mesh.geometry.boundingBox!.max.y;
